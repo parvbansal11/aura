@@ -29,11 +29,6 @@ npx serve .          # or:  python3 -m http.server 8080
 Open the served URL on your phone or desktop. It works fully offline after the
 first load, and Chrome will offer to install it.
 
-## Deploy (prototype submission)
-
-Drag the entire `web/` folder onto https://app.netlify.com/drop — you get a
-public HTTPS URL with no signup. The app is installable from that URL.
-
 ## Wire the backend
 
 Open `aura-api.js`. Every function has a comment naming the exact backend
