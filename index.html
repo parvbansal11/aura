@@ -296,7 +296,85 @@ svg{width:20px;height:20px;flex-shrink:0;display:block}
    ============================================================ */
 let lang = 'hi';
 let stack = ['vl1'];
-let worker = null; // set after authenticateWorker resolves
+let currentWorker = null;   // the logged-in worker (drives the whole dashboard)
+let pendingWorker = null;   // worker matched at login, awaiting confirmation
+let liveText = '';          // live speech transcript
+let heardFinal = '';        // final recognized text
+let recog = null;           // SpeechRecognition instance
+let recogState = 'idle';    // idle | listening | matched | nomatch | error | unsupported
+
+// Resolve a { en, hi } object by current language
+function L(obj){ if(obj == null) return ''; if(typeof obj === 'string') return obj; return lang === 'hi' ? (obj.hi ?? obj.en) : (obj.en ?? obj.hi); }
+// Current worker (never null once logged in; default to first for safety)
+function CW(){ return currentWorker || WORKERS[0]; }
+
+// Match what the worker said against the WORKERS dataset
+function matchWorker(text){
+  const t = (text || '').toLowerCase();
+  return WORKERS.find(w => w.match.some(k => t.includes(k.toLowerCase()))) || null;
+}
+
+// Real browser speech recognition (Web Speech API). No ML backend needed.
+function startRecognition(){
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  liveText = ''; heardFinal = ''; pendingWorker = null;
+  if(!SR){ recogState = 'unsupported'; go('vlpick'); return; }   // not supported -> tap to pick
+  recog = new SR();
+  recog.lang = (lang === 'hi') ? 'hi-IN' : 'en-IN';
+  recog.interimResults = true;
+  recog.maxAlternatives = 3;
+  recog.continuous = false;
+  recogState = 'listening';
+
+  recog.onresult = (e) => {
+    let interim = '';
+    for(let i = e.resultIndex; i < e.results.length; i++){
+      const tr = e.results[i][0].transcript;
+      if(e.results[i].isFinal) heardFinal += tr + ' '; else interim += tr;
+    }
+    liveText = (heardFinal + interim).trim();
+    updateLiveTranscript();
+    if(heardFinal.trim()){
+      const w = matchWorker(heardFinal);
+      if(w){ pendingWorker = w; recogState = 'matched'; stopRecognition(); setTimeout(() => go('vl4'), 650); }
+    }
+  };
+  recog.onerror = (e) => {
+    recogState = (e.error === 'not-allowed' || e.error === 'service-not-allowed') ? 'error' : 'nomatch';
+    updateLiveTranscript();
+  };
+  recog.onend = () => {
+    if(recogState === 'listening'){
+      const w = matchWorker(heardFinal || liveText);
+      if(w){ pendingWorker = w; recogState = 'matched'; setTimeout(() => go('vl4'), 400); }
+      else { recogState = heardFinal ? 'nomatch' : 'nomatch'; updateLiveTranscript(); }
+    }
+  };
+  try { recog.start(); } catch(err){ recogState = 'unsupported'; go('vlpick'); }
+}
+function stopRecognition(){ try { recog && recog.stop(); } catch(e){} }
+
+// Update the listening screen's live text + status without re-rendering (keeps mic alive)
+function updateLiveTranscript(){
+  const el = document.getElementById('live-text'); if(el) el.textContent = liveText || '…';
+  const st = document.getElementById('live-status');
+  if(st){
+    const map = {
+      listening: { en:'Listening…', hi:'सुन रहे हैं…' },
+      matched:   { en:'Got it ✓', hi:'मिल गया ✓' },
+      nomatch:   { en:'Did not catch a name. Say again, or tap your name below.', hi:'नाम समझ नहीं आया। फिर बोलो, या नीचे अपना नाम चुनो।' },
+      error:     { en:'Microphone blocked. Tap your name below instead.', hi:'माइक बंद है। नीचे अपना नाम चुनो।' }
+    };
+    st.textContent = L(map[recogState] || map.listening);
+    st.style.color = (recogState === 'matched') ? 'var(--green)' : (recogState === 'listening' ? 'var(--forest)' : 'var(--red)');
+  }
+  const ring = document.getElementById('live-ring');
+  if(ring) ring.classList.toggle('listening', recogState === 'listening');
+}
+
+// Tap-to-pick fallback (also used when speech is unsupported)
+function pickWorker(id){ pendingWorker = WORKERS.find(w => w.id === id) || WORKERS[0]; go('vl4'); }
+function confirmWorker(){ currentWorker = pendingWorker || WORKERS[0]; jump('vl5'); }
 
 /* ============================================================
    SECTION 5 — SVG ICONS
@@ -376,7 +454,7 @@ const navic = {att:'home',ece:'book',meal:'meal',health:'heart',audit:'grid'};
 function statusbar(time='8:04'){ return `<div class="statusbar"><span>${time}</span><span class="r">5G &nbsp;64%</span></div>`; }
 function header(){
   const t=T[lang];
-  return `<div class="header"><div class="avatar">${t.av}</div><div class="brand">AURA</div><div class="right"><span class="pill-lang">${t.pill}</span><span class="bell">${SVG.bell}</span></div></div>`;
+  return `<div class="header"><div class="avatar">${CW().av}</div><div class="brand">AURA</div><div class="right"><span class="pill-lang">${t.pill}</span><span class="bell">${SVG.bell}</span></div></div>`;
 }
 function nav(active){
   const t=T[lang];
@@ -406,17 +484,29 @@ const screens = {
   },
   vl2(){
     const t=T[lang];
-    return `<div class="screen active"><button class="backbtn" onclick="back()">‹ back</button>
-      ${statusbar('9:00')}<div class="scroll"><div class="body">
+    return `<div class="screen active"><button class="backbtn" onclick="stopRecognition();back()">‹ back</button>
+      ${statusbar()}<div class="scroll"><div class="body">
       ${kw(t.vlSpeak,'--forest')}<div class="sub">${t.vlSpeakSub}</div>
-      <div class="rings listening"><div class="r2"><div class="r3">${SVG.voice}</div></div></div>
-      <div style="text-align:center;font-size:16px;font-weight:700;color:var(--forest);margin-bottom:18px">${t.vlListening}</div>
+      <div id="live-ring" class="rings listening"><div class="r2"><div class="r3">${SVG.voice}</div></div></div>
+      <div id="live-status" style="text-align:center;font-size:15px;font-weight:700;color:var(--forest);margin-bottom:14px">${t.vlListening}</div>
       <div class="transcript">
         <div class="h" style="margin-top:0">${t.vlYouSaid}</div>
-        <div class="q" style="margin-top:4px">${t.vlSaidEx}</div>
-        <div class="h">${t.vlHeard}</div>
+        <div class="q" id="live-text" style="margin-top:4px;min-height:22px">…</div>
       </div>
-      <button class="btn green" onclick="handleLangDetect()">→ ${lang==='hi'?'भाषा जाँचो':'Detect language'}</button>
+      <button class="btn green" style="display:flex;gap:8px;align-items:center;justify-content:center" onclick="retryVoice()">${SVG.voice} ${L({en:'Speak again',hi:'फिर से बोलो'})}</button>
+      <button class="btn outline" style="margin-top:9px" onclick="stopRecognition();go('vlpick')">${L({en:'Or tap your name',hi:'या अपना नाम चुनो'})}</button>
+      </div></div></div>`;
+  },
+  vlpick(){
+    return `<div class="screen active"><button class="backbtn" onclick="back()">‹ back</button>
+      ${statusbar()}<div class="scroll"><div class="body">
+      <div class="kw" style="font-size:22px">${L({en:'Tap your name',hi:'अपना नाम चुनो'})}</div>
+      <div class="sub">${L({en:'Find your Anganwadi centre below.',hi:'नीचे अपना आंगनवाड़ी केंद्र चुनो।'})}</div>
+      ${WORKERS.map(w=>`<div class="slot" onclick="pickWorker('${w.id}')">
+        <div class="dot" style="background:var(--forest)">${w.av}</div>
+        <div class="meta"><div class="a" style="color:var(--ink)">${L(w.name)}</div><div class="b">${w.centre} · ${L(w.block)}</div></div>
+        <span class="chev" style="color:var(--muted)">›</span>
+      </div>`).join('')}
       </div></div></div>`;
   },
   vl3(){
@@ -440,26 +530,30 @@ const screens = {
   },
   vl4(){
     const t=T[lang];
-    const w = worker || MOCK.workerProfile;
-    return `<div class="screen active"><button class="backbtn" onclick="back()">‹ back</button>
-      ${statusbar('9:01')}<div class="scroll"><div class="body">
+    const w = pendingWorker || WORKERS[0];
+    return `<div class="screen active"><button class="backbtn" onclick="go('vlpick')">‹ back</button>
+      ${statusbar()}<div class="scroll"><div class="body">
       <div class="kw" style="font-size:22px">${t.vlIsThis}</div>
       <div class="sub">${t.vlFound}</div>
       <div class="profilecard">
-        <div class="pa">${t.av}</div>
-        <h3>${lang==='hi'?'मीरा देवी':'Meera Devi'}</h3>
+        <div class="pa">${w.av}</div>
+        <h3>${L(w.name)}</h3>
         <div class="role">${t.vlWorker}</div>
       </div>
-      ${t.vlRows.map(r=>`<div class="listrow"><span class="l">${r[0]}</span><span class="v">${r[1]}</span></div>`).join('')}
-      <button class="btn primary" style="margin-top:8px" onclick="jump('vl5')">${t.vlYesMe}</button>
-      <button class="btn outline" style="margin-top:9px" onclick="back()">${t.vlNotMe}</button>
+      <div class="listrow"><span class="l">${lang==='hi'?'केंद्र':'Centre'}</span><span class="v">${w.centre}</span></div>
+      <div class="listrow"><span class="l">${lang==='hi'?'ब्लॉक':'Block'}</span><span class="v">${L(w.block)}</span></div>
+      <div class="listrow"><span class="l">${lang==='hi'?'बच्चे':'Children'}</span><span class="v">${w.childCount} ${lang==='hi'?'दर्ज':'enrolled'}</span></div>
+      <button class="btn primary" style="margin-top:8px" onclick="confirmWorker()">${t.vlYesMe}</button>
+      <button class="btn outline" style="margin-top:9px" onclick="go('vlpick')">${t.vlNotMe}</button>
       </div></div></div>`;
   },
   vl5(){
     const t=T[lang];
+    const w = CW();
+    const first = L(w.name).split(' ')[0];
     return `<div class="screen dark active">
       <div class="logo" style="background:var(--forest-d)">${SVG.check}</div>
-      <h1 style="font-size:30px">${t.vlWelcome}</h1>
+      <h1 style="font-size:30px">${lang==='hi'?('स्वागत है, '+first):('Welcome, '+first)}</h1>
       <div class="tag">${t.vlWelcomeSub}</div>
       <button class="startbtn" onclick="jump('shell')">${t.vlStartDay} →</button>
       <div class="fine">${t.vlOpens}</div>
@@ -467,17 +561,22 @@ const screens = {
   },
   shell(){
     const t=T[lang];
+    const w=CW();
+    const first=L(w.name).split(' ')[0];
+    const greet=lang==='hi'?('सुप्रभात, '+first+'।'):('Good morning, '+first+'.');
+    const critCount=w.triage.filter(k=>k.tier==='critical').length;
+    const alertTxt=lang==='hi'?(critCount+' बच्चे ज़रूरी: तुरंत देखो'):(critCount+' children urgent: see now');
     return `<div class="screen active">${statusbar()}${header()}<div class="scroll"><div class="body">
-      <div class="greet">${t.greet}<small>${t.date}</small></div>
+      <div class="greet">${greet}<small>${t.date} · ${w.centre}</small></div>
       <div class="nowcard">
         <div class="nclock">${SVG.clock} ${t.nowClock}</div>
         <div class="nlabel">${t.nowLabel}</div>
         <h2>${t.nowTask}</h2>
-        <div class="ntask">${t.nowSub}</div>
+        <div class="ntask">${t.nowSub} · ${w.childCount} ${lang==='hi'?'बच्चे':'children'}</div>
         <button class="nowbtn" onclick="go('att')">${t.start}<span>→</span></button>
       </div>
       <div class="alert" onclick="go('triage')">
-        <span class="ai">${SVG.warn}</span><span class="t">${t.alert}</span><span class="chev">›</span>
+        <span class="ai">${SVG.warn}</span><span class="t">${alertTxt}</span><span class="chev">›</span>
       </div>
       <div class="sectionlabel">${t.day}</div>
       ${t.slots.map(s=>`<div class="slot ${s[3]?'now':''}" onclick="go('${s[2]}')">
@@ -489,18 +588,27 @@ const screens = {
   },
   triage(){
     const t=T[lang];
-    const blocks=t.blocks.map(b=>`
-      <div class="blockh" style="border-color:var(${b.c});background:var(${b.bg})">
+    const w=CW();
+    const tiers=[
+      {key:'critical', n:'01', c:'--red',   bg:'--rl', ti:{en:'See Now',hi:'तुरंत देखो'},   su:{en:'Very weak children',hi:'बहुत कमज़ोर बच्चे'}},
+      {key:'pending',  n:'02', c:'--amber', bg:'--al', ti:{en:'Pending',hi:'बाकी है'},      su:{en:'No info for 2+ days',hi:'2 दिन से जानकारी नहीं'}},
+      {key:'remaining',n:'03', c:'--green', bg:'--gl', ti:{en:'Remaining',hi:'बाकी काम'},   su:{en:'Vaccine, ration',hi:'टीका, राशन'}}
+    ];
+    const blocks=tiers.map(b=>{
+      const kids=w.triage.filter(k=>k.tier===b.key);
+      if(!kids.length) return '';
+      return `<div class="blockh" style="border-color:var(${b.c});background:var(${b.bg})">
         <span class="num" style="color:var(${b.c})">${b.n}</span>
-        <span class="ti" style="color:var(${b.c})">${b.t}</span>
-        <span class="su" style="color:var(${b.c})">${b.s}</span>
+        <span class="ti" style="color:var(${b.c})">${L(b.ti)}</span>
+        <span class="su" style="color:var(${b.c})">${L(b.su)}</span>
       </div>
-      ${b.kids.map(k=>`<div class="crow" style="border-left-color:var(${b.c})" onclick="go('health')">
+      ${kids.map(k=>`<div class="crow" style="border-left-color:var(${b.c})" onclick="go('health')">
         <div class="ic" style="background:var(${b.bg});color:var(${b.c})">!</div>
-        <div class="info"><div class="nm">${k.nm}</div><div class="ag">${k.ag}</div>
-          <div class="ds" style="color:var(${b.c})">${k.ds}</div></div>
-        ${k.tag?`<span class="tag" style="background:var(${b.bg});color:var(${b.c})">${k.tag}</span>`:''}
-      </div>`).join('')}`).join('');
+        <div class="info"><div class="nm">${L(k.name)}</div><div class="ag">${k.age}</div>
+          <div class="ds" style="color:var(${b.c})">${L(k.ds)}</div></div>
+        ${k.tag?`<span class="tag" style="background:var(${b.bg});color:var(${b.c})">${L(k.tag)}</span>`:''}
+      </div>`).join('')}`;
+    }).join('');
     return `<div class="screen active">${statusbar()}${header()}<div class="scroll"><div class="body">
       ${kw(t.triageKw,'--red')}${blocks}
     </div></div>${nav('home')}</div>`;
@@ -580,31 +688,34 @@ const screens = {
   },
   health(){
     const t=T[lang];
-    const vit=t.hVitals.map(v=>`<div class="vital">
-      <div class="l">${v[0]}</div><div class="v">${v[1]}</div>
+    const hRisk = CW().critical;
+    const cv = hRisk.vitals;
+    const vvals = [cv.weight, cv.height, cv.arm, cv.attendance + (lang==='hi'?' दिन':' days')];
+    const vit=t.hVitals.map((v,i)=>`<div class="vital">
+      <div class="l">${v[0]}</div><div class="v">${vvals[i]||v[1]}</div>
       <div class="d" style="color:var(${v[3]?'--red':'--green'})">${v[2]}</div>
     </div>`).join('');
-    const hRisk = MOCK.healthRisk;
+    const weakLabel = hRisk.category==='SAM' ? t.hVeryWeak : (lang==='hi'?'कमज़ोर (MAM)':'Weak (MAM)');
     return `<div class="screen active">${statusbar('1:20')}<div class="scroll">
       <div class="hero" style="background:var(--red);border-radius:0;padding:16px 20px 18px">
         <button class="backbtn" style="position:static;background:rgba(255,255,255,.2);border:none;color:#fff;margin-bottom:10px" onclick="back()">‹ back</button>
         <div style="display:flex;justify-content:space-between;align-items:flex-start">
-          <div><h2>${lang==='hi'?hRisk.nameHi:hRisk.name}</h2>
-            <p>${lang==='hi'?hRisk.ageHi:hRisk.age}</p></div>
-          <span style="background:#fff;color:var(--red);font-size:10px;font-weight:800;padding:5px 12px;border-radius:12px">${t.hDanger}</span>
+          <div><h2>${L(hRisk.name)}</h2>
+            <p>${L(hRisk.age)}</p></div>
+          <span style="background:#fff;color:var(--red);font-size:10px;font-weight:800;padding:5px 12px;border-radius:12px">${hRisk.category}</span>
         </div>
       </div>
       <div class="body">
         <div style="background:var(--rl);border:1px solid var(--red);border-left:4px solid var(--red);border-radius:12px;padding:13px;display:flex;gap:10px;margin-top:14px">
           <span style="color:var(--red);width:20px;height:20px;flex-shrink:0">${SVG.warn}</span>
           <div><div style="font-size:12px;font-weight:700;color:var(--red)">${t.hSignal}</div>
-            <div style="font-size:10px;color:var(--red);line-height:1.5;margin-top:4px">${lang==='hi'?hRisk.earlyWarningHi:hRisk.earlyWarning}</div>
+            <div style="font-size:10px;color:var(--red);line-height:1.5;margin-top:4px">${L(hRisk.warning)}</div>
           </div>
         </div>
         <div class="grid2" style="margin-top:14px">${vit}</div>
         <div class="vcard" style="border-left-color:var(--red);margin-top:14px">
-          <div style="font-size:9px;color:var(--muted)">${t.hScore}</div>
-          <div style="font-size:18px;font-weight:800;color:var(--red);margin-top:2px">${t.hVeryWeak}</div>
+          <div style="font-size:9px;color:var(--muted)">${t.hScore}: ${hRisk.zscore}</div>
+          <div style="font-size:18px;font-weight:800;color:var(--red);margin-top:2px">${weakLabel}</div>
         </div>
         <div class="grid2" style="margin-top:6px">
           <button class="btn red" onclick="handleHealthAction('weigh')">${t.hWeigh}</button>
@@ -661,16 +772,12 @@ const screens = {
    SECTION 9 — API-WIRED EVENT HANDLERS
    These are the "sockets" — each calls an AURA_API function.
    ============================================================ */
-async function handleVoiceLogin(){
-  // 🔌 SOCKET: voice onboarding flow
-  // Real flow: record audio → transcribeVoice → authenticateWorker → go('vl3')
+function handleVoiceLogin(){
+  // Real voice login: render the listening screen, then start the mic (within the click gesture)
   go('vl2');
+  startRecognition();
 }
-async function handleLangDetect(){
-  // 🔌 SOCKET: AURA_API.detectLanguage(audioBlob) → go('vl3')
-  const result = await callAPI(AURA_API.detectLanguage, null);
-  if(result) go('vl3');
-}
+function retryVoice(){ go('vl2'); startRecognition(); }
 async function handleVoiceSARR(){
   // 🔌 SOCKET: record audio → transcribeVoice → runSARR → update registers
   const sarr = await callAPI(AURA_API.runSARR, { transcript: T[lang].voiceQ, centreId: 'AWC_04', children: MOCK.children });
