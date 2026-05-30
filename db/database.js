@@ -1,86 +1,89 @@
 'use strict';
 /**
- * Thin shim that wraps node:sqlite's DatabaseSync to match the
- * better-sqlite3 surface used by setup_database.js and extended_queries.js.
+ * Database adapter.
+ * Tries better-sqlite3 first: prebuilt binaries ship for Node 18/20/22
+ * on Linux/macOS/Windows, so this works on Vercel out of the box.
  *
- * Supports: exec(), prepare(), pragma(), transaction(), close().
- * Stmt supports: run(), all(), get().
+ * Falls back to the node:sqlite shim for Node 26+ dev machines where
+ * better-sqlite3 prebuilts don't yet exist and Python 3.14 breaks
+ * native compilation.
  */
 
-const { DatabaseSync } = require('node:sqlite');
-
-class Database {
-  constructor(filePath, _opts) {
-    this._db = new DatabaseSync(filePath);
+function tryBetterSqlite() {
+  try {
+    const Sqlite = require('better-sqlite3');
+    // The require() succeeds even when the native binding is missing —
+    // probe the binding by opening an in-memory DB.
+    const probe = new Sqlite(':memory:');
+    probe.close();
+    return Sqlite;
+  } catch (_) {
+    return null;
   }
+}
 
-  exec(sql) {
-    this._db.exec(sql);
-    return this;
-  }
+const BetterSqlite = tryBetterSqlite();
 
-  pragma(pragmaStr, opts) {
-    // Handle "PRAGMA foo = bar" form
-    if (!opts) {
-      this._db.exec(`PRAGMA ${pragmaStr}`);
+if (BetterSqlite) {
+  module.exports = BetterSqlite;
+} else {
+  // Local dev on Node 26+ — fall back to Node's built-in node:sqlite
+  // (stable since Node 24; experimental in 22.5+ with --experimental-sqlite).
+  const { DatabaseSync } = require('node:sqlite');
+
+  class Database {
+    constructor(filePath, _opts) {
+      this._db = new DatabaseSync(filePath);
+    }
+
+    exec(sql) {
+      this._db.exec(sql);
       return this;
     }
-    // Handle pragma('foreign_keys', { simple: true }) → returns scalar
-    const key   = pragmaStr.trim();
-    const stmt  = this._db.prepare(`PRAGMA ${key}`);
-    const row   = stmt.get();
-    if (!row) return null;
-    const vals  = Object.values(row);
-    return opts.simple ? vals[0] : vals;
-  }
 
-  prepare(sql) {
-    const raw = this._db.prepare(sql);
-    return new Statement(raw);
-  }
-
-  transaction(fn) {
-    return (...args) => {
-      this._db.exec('BEGIN IMMEDIATE');
-      try {
-        const result = fn(...args);
-        this._db.exec('COMMIT');
-        return result;
-      } catch (err) {
-        this._db.exec('ROLLBACK');
-        throw err;
+    pragma(pragmaStr, opts) {
+      if (!opts) {
+        this._db.exec(`PRAGMA ${pragmaStr}`);
+        return this;
       }
-    };
+      const key  = pragmaStr.trim();
+      const row  = this._db.prepare(`PRAGMA ${key}`).get();
+      if (!row) return null;
+      const vals = Object.values(row);
+      return opts.simple ? vals[0] : vals;
+    }
+
+    prepare(sql) {
+      return new Statement(this._db.prepare(sql));
+    }
+
+    transaction(fn) {
+      return (...args) => {
+        this._db.exec('BEGIN IMMEDIATE');
+        try {
+          const result = fn(...args);
+          this._db.exec('COMMIT');
+          return result;
+        } catch (err) {
+          this._db.exec('ROLLBACK');
+          throw err;
+        }
+      };
+    }
+
+    close() { this._db.close(); }
   }
 
-  close() {
-    this._db.close();
+  class Statement {
+    constructor(raw) { this._raw = raw; }
+    run(...args)  { return this._raw.run(..._flat(args)); }
+    all(...args)  { return this._raw.all(..._flat(args)); }
+    get(...args)  { return this._raw.get(..._flat(args)); }
   }
+
+  function _flat(a) {
+    return a.length === 1 && Array.isArray(a[0]) ? a[0] : a;
+  }
+
+  module.exports = Database;
 }
-
-class Statement {
-  constructor(raw) {
-    this._raw = raw;
-  }
-
-  run(...args) {
-    // node:sqlite run() returns { changes, lastInsertRowid }
-    return this._raw.run(..._flatten(args));
-  }
-
-  all(...args) {
-    return this._raw.all(..._flatten(args));
-  }
-
-  get(...args) {
-    return this._raw.get(..._flatten(args));
-  }
-}
-
-// better-sqlite3 accepts stmt.run(p1, p2, p3) or stmt.run([p1,p2,p3])
-function _flatten(args) {
-  if (args.length === 1 && Array.isArray(args[0])) return args[0];
-  return args;
-}
-
-module.exports = Database;
