@@ -1,0 +1,21 @@
+{
+  "name": "aura-pwa",
+  "version": "1.0.0",
+  "description": "A.U.R.A. — Anganwadi Unified Resource Assistant. Offline-first PWA + Node API server.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "init-db": "node db/setup_database.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "jspdf": "^2.5.1",
+    "jspdf-autotable": "^3.8.2"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "private": true
+}

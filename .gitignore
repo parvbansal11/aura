@@ -1,0 +1,7 @@
+node_modules/
+db/aura_local.db
+db/aura_local.db-shm
+db/aura_local.db-wal
+.env
+.DS_Store
+*.log

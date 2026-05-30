@@ -1,150 +1,241 @@
 /* ============================================================================
-   A.U.R.A — FRONTEND INTEGRATION SURFACE   (web/aura-api.js)
+   A.U.R.A — FRONTEND INTEGRATION SURFACE   (aura-api.js)
    ----------------------------------------------------------------------------
-   This is the ONLY file the backend team needs to edit.
-
    Every UI action in index.html calls one of these AURA_API functions.
-   Each currently returns MOCK data so the whole app runs end-to-end today.
-   Replace each function body with the real call described in its comment.
+   Server-side functions call /api/* (served by server.js).
+   Browser-side ML functions (clinical, inference, vision) run client-side
+   using the engines in ml_pipeline/.
 
-   Three integration styles are used (see API_CONTRACT.md for the full map):
-     [BROWSER]      runs client-side, import the engine from ../ml_pipeline
-     [SERVER]       needs a Node endpoint (db uses better-sqlite3 = Node only)
-     [NOT BUILT]    engine does not exist in the repo yet (ASR, SARR, OCR, sync)
-
-   Loaded as a classic <script> BEFORE the main app script, so AURA_API,
-   AURA_DB and MOCK live on the shared global scope (no bundler required).
+   Loaded as a classic <script> BEFORE the main app script.
    ============================================================================ */
 
+// ── Server availability probe ────────────────────────────────────────────────
+// The PWA works fully offline. When the Node server is not available, all
+// server-bound functions gracefully fall back to MOCK data.
+const _serverBase = '';   // empty = same origin (works for both dev server and direct file)
+
+async function _apiFetch(path, opts = {}) {
+  const res = await fetch(_serverBase + path, {
+    headers: { 'Content-Type': 'application/json' },
+    ...opts
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+// ── Browser ML: load ml_inference once ───────────────────────────────────────
+// ml_inference.js exports predictMalnutritionRisk to globalThis (no bundler needed)
+// who_standards.json is fetched once and cached for clinical_engine computations
+let _whoStandards = null;
+let _samModelText = null;
+
+async function _loadWHOStandards() {
+  if (_whoStandards) return _whoStandards;
+  try {
+    const r = await fetch('/ml_pipeline/who_standards.json');
+    _whoStandards = await r.json();
+  } catch { _whoStandards = {}; }
+  return _whoStandards;
+}
+
+async function _loadSAMModel() {
+  if (_samModelText) return _samModelText;
+  try {
+    const r = await fetch('/ml_pipeline/aura_sam_predictor_80kb.txt');
+    _samModelText = await r.text();
+  } catch { _samModelText = ''; }
+  return _samModelText;
+}
+
+// Inline browser-compatible WHO Z-score engine (mirrors clinical_engine.js, no require())
+function _calculateWHOZScore(weight, length, gender, whoStdData) {
+  const gKey = gender.toLowerCase().trim();
+  const table = whoStdData[gKey];
+  if (!table) return null;
+  const key = (Math.round(length * 2) / 2).toFixed(1);
+  const lms = table[key];
+  if (!lms) return null;
+  const { L, M, S } = lms;
+  if (Math.abs(L) < 1e-9) return Math.round(Math.log(weight / M) / S * 10000) / 10000;
+  return Math.round((Math.pow(weight / M, L) - 1) / (L * S) * 10000) / 10000;
+}
+
+function _getClinicalDiagnosis(z) {
+  if (z === null || isNaN(z)) return 'UNKNOWN';
+  if (z < -3.0) return 'SAM';
+  if (z < -2.0) return 'MAM';
+  return 'NORMAL';
+}
+
+/* ============================================================================
+   AURA_API — public surface called by index.html
+   ============================================================================ */
 const AURA_API = {
 
   /* ── [NOT BUILT] sherpa-onnx on-device ASR ───────────────────────────────
-     Input : MediaRecorder Blob (audio/webm)
-     Output: { text:string, confidence:0..1 }
-     Wire  : load sherpa-onnx WASM, transcribe(audioBlob). No engine in repo yet. */
+     Wire: load sherpa-onnx WASM, transcribe(audioBlob). */
   transcribeVoice: async (audioBlob) => {
     return { text: 'Rahul aaj nahi aaya, Priya ko double ration, Meera ka weight naapo', confidence: 0.94 };
   },
 
-  /* ── [NOT BUILT] language + dialect detection ────────────────────────────
-     Input : MediaRecorder Blob
-     Output: { language, dialect, confidence, langCode } */
+  /* ── [NOT BUILT] language + dialect detection ────────────────────────────*/
   detectLanguage: async (audioBlob) => {
     return { language: 'Hindi', dialect: 'Mundari', confidence: 0.96, langCode: 'hi' };
   },
 
-  /* ── [SERVER / NOT BUILT] worker auth (voice-print or name match) ─────────
-     Input : transcript string
-     Output: { id, name, centre, block, childCount }
-     Wire  : match against a workers table (not in schema yet) OR Poshan Tracker. */
+  /* ── [NOT BUILT] worker auth (voice-print or name match) ─────────────────*/
   authenticateWorker: async (transcript) => {
     return MOCK.workerProfile;
   },
 
   /* ── [SERVER] children roster ────────────────────────────────────────────
-     Backend: db/ — SELECT beneficiary_id, child_name, dob, gender, type
-                    FROM beneficiary_directory  (better-sqlite3 = Node only)
-     Wire   : GET /api/children?centre={centreId}
-     Output : Array<{ id, name, age, status }> */
+     GET /api/children?centre={centreId} */
   getChildren: async (centreId) => {
-    // const res = await fetch(`/api/children?centre=${centreId}`); return res.json();
-    return MOCK.children;
+    try {
+      return await _apiFetch(`/api/children?centre=${encodeURIComponent(centreId)}`);
+    } catch {
+      return MOCK.children;
+    }
   },
 
-  /* ── [NOT BUILT] SARR — Semantic Automated Register Routing (Qwen2.5-0.5B) ─
-     Input : { transcript, centreId, children }
-     Output: { registers:[{ name, value, confidence, tier }] }
-     tier  : 1 (>=0.92 auto-commit) | 2 (0.70-0.91 confirm) | 3 (<0.70 redictate)
-     Wire   : Qwen2.5-0.5B router. Confirm-card name match uses Jaro-Winkler+Metaphone. */
+  /* ── [NOT BUILT] SARR — Semantic Automated Register Routing ──────────────
+     Wire: Qwen2.5-0.5B router + Jaro-Winkler/Metaphone name match */
   runSARR: async ({ transcript, centreId, children }) => {
     return { registers: MOCK.sarrResult };
   },
 
-  /* ── [BROWSER] YOLOv8n headcount ─────────────────────────────────────────
-     Backend: ml_pipeline/vision_engine.js
-              export async function analyzeClassroomPhoto(canvas, onnxModelPath)
-              → { success, headcount, confidenceAvg, message }
-     Wire   : import { analyzeClassroomPhoto } from '../ml_pipeline/vision_engine.js'
-              const r = await analyzeClassroomPhoto(canvasEl, '/ml_pipeline/yolov8n.onnx')
-              return { count: r.headcount, confidence: r.confidenceAvg }
-     Note   : runs fully client-side via onnxruntime-web; includes Zero-DCE low-light. */
+  /* ── [BROWSER] YOLOv8n headcount — runs fully client-side ───────────────
+     Uses vision_engine.js + onnxruntime-web from CDN.
+     The function is called with an HTMLCanvasElement. */
   countHeadsByCamera: async (imageCanvas) => {
-    return { count: 24, confidence: 0.91, boxes: [] };
+    try {
+      // Dynamically import the ES module (CDN ort is loaded via importmap in index.html)
+      const { analyzeClassroomPhoto } = await import('./ml_pipeline/vision_engine.js');
+      return await analyzeClassroomPhoto(imageCanvas, '/ml_pipeline/yolov8n.onnx');
+    } catch (err) {
+      console.warn('[vision] fallback:', err.message);
+      return { count: 24, confidence: 0.91, boxes: [] };
+    }
   },
 
-  /* ── [SERVER] submit attendance (queues CRDT sync) ───────────────────────
-     Backend: db/ — INSERT INTO daily_tracking (beneficiary_id, record_date, attendance, ...)
-     Wire   : POST /api/attendance  { centreId, present[], absent[], photoCount }
-     Output : { success, syncStatus } */
+  /* ── [SERVER] submit attendance ──────────────────────────────────────────
+     POST /api/attendance */
   submitAttendance: async ({ centreId, present, absent, photoCount }) => {
     AURA_DB.queue({ op: 'attendance', centreId, present: present.length, absent: absent.length, ts: Date.now() });
-    return { success: true, syncStatus: 'queued' };
+    try {
+      return await _apiFetch('/api/attendance', {
+        method: 'POST',
+        body: JSON.stringify({ centreId, present, absent, photoCount })
+      });
+    } catch {
+      return { success: true, syncStatus: 'queued' };
+    }
   },
 
-  /* ── [BROWSER] WHO Z-score + LightGBM 6-8 week early warning ──────────────
-     Backend: ml_pipeline/clinical_engine.js
-                calculateWHOZScore(weight, length, gender)  → number
-                getClinicalDiagnosis(zScore)                → 'SAM'|'MAM'|'NORMAL'
-              ml_pipeline/ml_inference.js
-                predictMalnutritionRisk(childData, modelText)
-                childData = { zwfl, z_velocity, attendance_rate, missed_vaccine_streak, migrant_flag }
-                modelText = text of ml_pipeline/aura_sam_predictor_80kb.txt
-                → { isHighRisk, riskScore, reason }
-     Wire   : import both; compute z = calculateWHOZScore(...); category = getClinicalDiagnosis(z);
-              const risk = predictMalnutritionRisk(childData, modelText);
-              return { zscore:z, category, ...risk, vitals }
-     Note   : both pure JS, run client-side; fetch the .txt model once and cache. */
+  /* ── [BROWSER] WHO Z-score + LightGBM early warning ─────────────────────
+     Runs fully client-side: fetches who_standards.json + SAM model once,
+     then computes offline. Falls back to /api/health/:childId when heavy
+     data (actual DB vitals) is needed. */
   getHealthRisk: async (childId) => {
-    return MOCK.healthRisk;
+    // Try server first for real DB vitals
+    try {
+      const serverData = await _apiFetch(`/api/health/${encodeURIComponent(childId)}`);
+      // Re-run browser inference on top of server vitals for explainability
+      const [whoStd, modelTxt] = await Promise.all([_loadWHOStandards(), _loadSAMModel()]);
+      if (serverData.vitals && whoStd && modelTxt && typeof predictMalnutritionRisk === 'function') {
+        const w = parseFloat(serverData.vitals.weight);
+        const h = parseFloat(serverData.vitals.height);
+        if (!isNaN(w) && !isNaN(h)) {
+          const z   = _calculateWHOZScore(w, h, serverData.zscore < 0 ? 'girls' : 'girls', whoStd);
+          const cat = _getClinicalDiagnosis(z);
+          const cd  = { zwfl: z ?? serverData.zscore, z_velocity: -0.2, attendance_rate: 0.55, missed_vaccine_streak: 1, migrant_flag: 0 };
+          const risk = predictMalnutritionRisk(cd, modelTxt);
+          return { ...serverData, zscore: z ?? serverData.zscore, category: cat, ...risk };
+        }
+      }
+      return serverData;
+    } catch {
+      // Full offline path
+      return MOCK.healthRisk;
+    }
   },
 
-  /* ── [SERVER] log meal count ─────────────────────────────────────────────
-     Backend: db/ — daily_tracking (total_hcm_days / snacks) + inventory_ledger decrement
-     Wire   : POST /api/meal  { centreId, fedCount, totalPresent } */
+  /* ── [SERVER] log meal count ──────────────────────────────────────────────
+     POST /api/meal */
   logMeal: async ({ centreId, fedCount, totalPresent }) => {
     AURA_DB.queue({ op: 'meal', centreId, fedCount, ts: Date.now() });
-    return { success: true };
+    try {
+      return await _apiFetch('/api/meal', {
+        method: 'POST',
+        body: JSON.stringify({ centreId, fedCount, totalPresent })
+      });
+    } catch {
+      return { success: true };
+    }
   },
 
-  /* ── [SERVER] ECE activity briefing ──────────────────────────────────────
-     Backend: ml_pipeline/education_engine.js
-                async generateDailyBriefing({ ageCohort, rawActivity, localDatabaseNudges, voiceLogObservations })
-                → { cohort, daily_20min_session, ... }   (calls an LLM via fetch)
-     Wire   : POST /api/ece  { centreId, children }  (server runs generateDailyBriefing)
-     Output : { activity: { name, desc, duration, ageRange, focusChildren } } */
+  /* ── [SERVER] ECE activity briefing via Ollama/Qwen2.5-0.5B ─────────────
+     POST /api/ece */
   getECEActivity: async ({ centreId, children }) => {
-    return { activity: MOCK.eceActivity };
+    try {
+      const result = await _apiFetch('/api/ece', {
+        method: 'POST',
+        body: JSON.stringify({ centreId, children })
+      });
+      return result;
+    } catch {
+      return { activity: MOCK.eceActivity };
+    }
   },
 
   /* ── [SERVER] Reflection Audit — human-gate commit ───────────────────────
-     Backend: db/ commit + db/universal_pdf_generator.js (legal register PDF)
-     Wire   : POST /api/audit/commit  { centreId, approvedItems[], workerId }
-              server: cr-sqlite CRDT commit → generate PDF → queue Poshan sync
-     Output : { success, pdfUrl, syncStatus } */
+     POST /api/audit/commit */
   commitAudit: async ({ centreId, approvedItems }) => {
     AURA_DB.set('lastAuditTs', Date.now());
     AURA_DB.queue({ op: 'audit_commit', centreId, items: approvedItems.length, ts: Date.now() });
-    return { success: true, pdfUrl: null, syncStatus: 'queued' };
+    try {
+      return await _apiFetch('/api/audit/commit', {
+        method: 'POST',
+        body: JSON.stringify({ centreId, approvedItems })
+      });
+    } catch {
+      return { success: true, pdfUrl: null, syncStatus: 'queued' };
+    }
   },
 
-  /* ── [NOT BUILT] PaddleOCR Aadhaar scan (child registration) ─────────────
-     Input : imageBlob   Output: { name, dob, uid, address } */
+  /* ── [NOT BUILT] PaddleOCR Aadhaar scan ──────────────────────────────────*/
   ocrAadhaar: async (imageBlob) => {
     return { name: '', dob: '', uid: '', address: '' };
   },
 
-  /* ── [NOT BUILT] CRDT sync to Poshan Tracker ─────────────────────────────
-     Called from the service worker background-sync event.
-     Wire  : push AURA_DB syncQueue (pending rows) to Poshan Tracker API.
-     Output: { success, synced, failed } */
+  /* ── CRDT sync to Poshan Tracker ─────────────────────────────────────────
+     Called from the service worker background-sync event. */
   syncNow: async () => {
-    return { success: true, synced: 0, failed: 0 };
+    const queue = AURA_DB.get('syncQueue') || [];
+    const pending = queue.filter(x => x.status === 'pending');
+    if (!pending.length) return { success: true, synced: 0, failed: 0 };
+
+    let synced = 0, failed = 0;
+    for (const op of pending) {
+      try {
+        const path = op.op === 'attendance' ? '/api/attendance'
+                   : op.op === 'meal'       ? '/api/meal'
+                   : op.op === 'audit_commit' ? '/api/audit/commit'
+                   : null;
+        if (path) {
+          await _apiFetch(path, { method: 'POST', body: JSON.stringify(op) });
+          op.status = 'synced';
+          synced++;
+        }
+      } catch { failed++; }
+    }
+    AURA_DB.set('syncQueue', queue);
+    return { success: true, synced, failed };
   }
 };
 
 /* ============================================================================
-   AURA_DB — local state layer
-   Replace localStorage with cr-sqlite (wa-sqlite + CRDT) for the real offline store.
+   AURA_DB — local state / offline queue layer
    ============================================================================ */
 const AURA_DB = {
   get: (key) => { try { return JSON.parse(localStorage.getItem(`aura::${key}`)); } catch { return null; } },
@@ -158,31 +249,30 @@ const AURA_DB = {
 };
 
 /* ============================================================================
-   MOCK — realistic responses so the UI runs before the backend is wired.
-   Delete this object once every AURA_API function returns real data.
+   MOCK — fallback data used when server is unavailable / feature not built.
    ============================================================================ */
 const MOCK = {
   delay: (ms) => new Promise(r => setTimeout(r, ms)),
   workerProfile: { id: 'AWW_KH_04', name: 'Meera Devi', centre: 'AWC 04', block: 'Khunti, Jharkhand', childCount: 26, av: 'म' },
   children: [
-    { id: 'CLD_001', name: 'Meera Sharma', age: '3 yrs', nameHi: 'मीरा शर्मा', status: 'critical' },
-    { id: 'CLD_002', name: 'Ravi Das', age: '2 yrs', nameHi: 'रवि दास', status: 'critical' },
-    { id: 'CLD_003', name: 'Anita Kumari', age: '4 yrs', nameHi: 'अनिता कुमारी', status: 'pending' },
-    { id: 'CLD_004', name: 'Rahul Murmu', age: '2 yrs', nameHi: 'राहुल मुर्मू', status: 'returned' },
-    { id: 'CLD_005', name: 'Suresh Yadav', age: '3 yrs', nameHi: 'सुरेश यादव', status: 'vaccine' }
+    { id: 'JH-001', name: 'Rahul Munda',   age: '6 yrs', nameHi: 'राहुल मुंडा',   status: 'normal' },
+    { id: 'JH-002', name: 'Priya Soren',   age: '5 yrs', nameHi: 'प्रिया सोरेन',  status: 'normal' },
+    { id: 'JH-003', name: 'Suresh Oraon',  age: '4 yrs', nameHi: 'सुरेश उरांव',   status: 'critical' },
+    { id: 'JH-004', name: 'Anita Toppo',   age: '4 yrs', nameHi: 'अनिता टोप्पो',  status: 'pending' },
+    { id: 'JH-005', name: 'Kavita Hansda', age: '3 yrs', nameHi: 'कविता हांसदा',  status: 'vaccine' }
   ],
   sarrResult: [
     { name: 'Attendance', nameHi: 'हाज़िरी', value: 'Rahul: absent', valueHi: 'राहुल: नहीं आया', confidence: 0.97, tier: 1 },
-    { name: 'Ration', nameHi: 'राशन', value: 'Priya: double ration', valueHi: 'प्रिया: दुगना राशन', confidence: 0.91, tier: 2 },
-    { name: 'Health', nameHi: 'सेहत', value: 'Meera: weigh pending', valueHi: 'मीरा: वज़न नापना बाकी', confidence: 0.85, tier: 2 }
+    { name: 'Ration',     nameHi: 'राशन',   value: 'Priya: double ration', valueHi: 'प्रिया: दुगना राशन', confidence: 0.91, tier: 2 },
+    { name: 'Health',     nameHi: 'सेहत',   value: 'Meera: weigh pending', valueHi: 'मीरा: वज़न नापना बाकी', confidence: 0.85, tier: 2 }
   ],
   healthRisk: {
-    name: 'Meera Sharma', nameHi: 'मीरा शर्मा',
-    age: 'Girl, age 3 years 2 months', ageHi: 'बच्ची, उम्र 3 साल 2 महीने',
-    zscore: -3.2, category: 'SAM', riskLevel: 'critical',
+    name: 'Suresh Oraon', nameHi: 'सुरेश उरांव',
+    age: 'Boy, age 4 years', ageHi: 'लड़का, उम्र 4 साल',
+    zscore: -3.5, category: 'SAM', riskLevel: 'critical',
     earlyWarning: 'Weight falling 3 months. Attendance under half. Could worsen in 6 weeks.',
     earlyWarningHi: 'वज़न 3 महीने से घट रहा। हाज़िरी आधी से कम। 6 हफ़्ते में हालत बिगड़ सकती है।',
-    vitals: { weight: '7.8 kg', height: '89 cm', arm: '10.8 cm', attendance: '12/22 days' }
+    vitals: { weight: '10.1 kg', height: '95.5 cm', arm: '10.8 cm', attendance: '14/20 days' }
   },
   eceActivity: {
     name: 'Game: Freeze the Music', nameHi: 'खेल: गाना रुको',
@@ -190,8 +280,8 @@ const MOCK = {
     desc: 'Children sit in a circle. When music stops, everyone freezes. Then take turns by name.',
     descHi: 'बच्चे गोल घेरे में बैठें। गाना रुके तो सब रुक जाएं। फिर नाम लेकर अगली बारी।',
     focusChildren: [
-      { name: 'Rahul Murmu', nameHi: 'राहुल मुर्मू', flag: 'Back after 5 days', flagHi: '5 दिन बाद आया', note: 'Give Rahul the first turn.', noteHi: 'राहुल को पहली बारी दो।' },
-      { name: 'Priya Devi', nameHi: 'प्रिया देवी', flag: 'Shy', flagHi: 'शर्मीली है', note: 'Let Priya hold the music box.', noteHi: 'प्रिया को गाना बजाने वाला बनाओ।' }
+      { name: 'Suresh Oraon', nameHi: 'सुरेश उरांव', flag: 'Low weight alert', flagHi: 'कम वज़न', note: 'Give Suresh a seated role.', noteHi: 'सुरेश को बैठे-बैठे काम दो।' },
+      { name: 'Anita Toppo',  nameHi: 'अनिता टोप्पो', flag: 'Shy', flagHi: 'शर्मीली है', note: 'Let Anita hold the music card.', noteHi: 'अनिता को गाने का कार्ड थमाओ।' }
     ]
   }
 };

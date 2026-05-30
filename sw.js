@@ -1,21 +1,32 @@
 /* ============================================================
-   AURA Service Worker  —  aura-pwa/sw.js
+   AURA Service Worker  —  sw.js
    Cache-first offline strategy.
-   Background sync stub → wire to cr-sqlite CRDT push.
-   Push notification stub → wire to LightGBM health alerts.
+   Background sync wired to AURA_API.syncNow().
    ============================================================ */
 
-const CACHE_VERSION = 'aura-v1';
-const STATIC_ASSETS = ['/', '/index.html', '/icon.svg', '/manifest.json'];
+const CACHE_VERSION = 'aura-v2';
+const STATIC_ASSETS = [
+  '/',
+  '/index.html',
+  '/icon.svg',
+  '/manifest.json',
+  '/aura-api.js',
+  '/ml_pipeline/ml_inference.js',
+  '/ml_pipeline/vision_engine.js',
+  '/ml_pipeline/who_standards.json',
+  '/ml_pipeline/aura_sam_predictor_80kb.txt',
+  '/ml_pipeline/yolov8n.onnx'
+];
 
 // ─── Install: pre-cache static shell ───────────────────────
 self.addEventListener('install', (event) => {
-  console.log('[SW] Installing AURA service worker');
+  console.log('[SW] Installing AURA service worker v2');
   event.waitUntil(
     caches.open(CACHE_VERSION).then(cache =>
-      cache.addAll(STATIC_ASSETS).catch(err =>
-        console.warn('[SW] Pre-cache partial failure (fonts may skip):', err)
-      )
+      // Use individual adds so one failure doesn't block the rest
+      Promise.allSettled(STATIC_ASSETS.map(url =>
+        cache.add(url).catch(err => console.warn('[SW] Pre-cache skip:', url, err.message))
+      ))
     )
   );
   self.skipWaiting();
@@ -36,8 +47,10 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
 
-  // 🔌 PLUG: /api/* calls bypass cache → always hit your backend
-  if (new URL(event.request.url).pathname.startsWith('/api/')) {
+  const url = new URL(event.request.url);
+
+  // /api/* and Ollama calls → always network, 503 fallback offline
+  if (url.pathname.startsWith('/api/') || url.hostname === 'localhost' && url.port === '11434') {
     event.respondWith(
       fetch(event.request).catch(() =>
         new Response(JSON.stringify({ error: 'offline', code: 503 }), {
@@ -57,19 +70,16 @@ self.addEventListener('fetch', (event) => {
         caches.open(CACHE_VERSION).then(cache => cache.put(event.request, clone));
         return response;
       }).catch(() => {
-        // Navigation fallback → serve app shell
         if (event.request.mode === 'navigate') return caches.match('/index.html');
       });
     })
   );
 });
 
-// ─── Background Sync: CRDT push to Poshan Tracker ──────────
-// Fires automatically when connectivity is restored after
-// navigator.serviceWorker.ready.then(sw => sw.sync.register('aura-poshan-sync'))
+// ─── Background Sync: call AURA_API.syncNow() ──────────────
 self.addEventListener('sync', (event) => {
   if (event.tag === 'aura-poshan-sync') {
-    console.log('[SW] Background sync: aura-poshan-sync fired');
+    console.log('[SW] Background sync: aura-poshan-sync');
     event.waitUntil(runPoshanSync());
   }
   if (event.tag === 'aura-pdf-gen') {
@@ -78,35 +88,38 @@ self.addEventListener('sync', (event) => {
 });
 
 async function runPoshanSync() {
-  // 🔌 PLUG: replace this stub with actual CRDT sync logic
-  // Steps:
-  //   1. Open cr-sqlite and pull all rows with sync_status = 'pending'
-  //   2. POST changesets to your Poshan Tracker sync endpoint
-  //   3. On 200, mark rows as sync_status = 'synced'
-  //   4. Notify all open clients with { type: 'SYNC_COMPLETE', count }
-  console.log('[SW] 🔌 runPoshanSync — replace with cr-sqlite CRDT push');
   const clients = await self.clients.matchAll();
-  clients.forEach(c => c.postMessage({ type: 'SYNC_STATUS', status: 'stub', synced: 0 }));
+
+  // Ask a client to run AURA_API.syncNow() (it has DB access)
+  for (const client of clients) {
+    client.postMessage({ type: 'RUN_SYNC' });
+  }
+
+  // If no clients are open, attempt a direct POST with queued data
+  // (best-effort: the main thread will reconcile on next open)
+  if (!clients.length) {
+    try {
+      await fetch('/api/attendance', { method: 'POST', body: '{}', headers: { 'Content-Type': 'application/json' } });
+    } catch (_) {}
+  }
+
+  clients.forEach(c => c.postMessage({ type: 'SYNC_COMPLETE' }));
 }
 
 async function runPDFGeneration() {
-  // 🔌 PLUG: generate PDF register copies after audit commit
-  // Use jsPDF or a server-side endpoint; store in OPFS or send to worker
-  console.log('[SW] 🔌 runPDFGeneration — replace with PDF gen logic');
+  console.log('[SW] PDF generation deferred to server /api/pdf/*');
 }
 
 // ─── Push Notifications: malnutrition early-warning alerts ─
-// 🔌 PLUG: your LightGBM backend sends a push payload like:
-//   { title: "AURA Alert", body: "Meera flagged: risk in 6 weeks", screen: "health", childId: "CLD_042" }
 self.addEventListener('push', (event) => {
   const data = event.data?.json() ?? {};
   const options = {
-    body: data.body ?? 'A child needs attention today.',
-    icon: '/icon.svg',
-    badge: '/icon.svg',
-    tag: 'aura-health-alert',
-    vibrate: [200, 100, 200],
-    data: { screen: data.screen ?? 'triage', childId: data.childId ?? null }
+    body:     data.body    ?? 'A child needs attention today.',
+    icon:     '/icon.svg',
+    badge:    '/icon.svg',
+    tag:      'aura-health-alert',
+    vibrate:  [200, 100, 200],
+    data:     { screen: data.screen ?? 'triage', childId: data.childId ?? null }
   };
   event.waitUntil(
     self.registration.showNotification(data.title ?? 'AURA', options)
@@ -125,10 +138,14 @@ self.addEventListener('notificationclick', (event) => {
   );
 });
 
-// ─── Message from main thread ──────────────────────────────
+// ─── Messages from main thread ─────────────────────────────
 self.addEventListener('message', (event) => {
   if (event.data?.type === 'SKIP_WAITING') self.skipWaiting();
   if (event.data?.type === 'TRIGGER_SYNC') {
     self.registration.sync?.register('aura-poshan-sync').catch(console.warn);
+  }
+  if (event.data?.type === 'SYNC_RESULT') {
+    // Forward sync result to all clients
+    self.clients.matchAll().then(cs => cs.forEach(c => c.postMessage({ type: 'SYNC_COMPLETE', ...event.data })));
   }
 });

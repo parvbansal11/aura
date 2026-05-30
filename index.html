@@ -14,6 +14,16 @@
 <link rel="apple-touch-icon" href="/icon.svg">
 <title>A.U.R.A.</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700;800&family=Noto+Sans+Devanagari:wght@400;500;700&display=swap" rel="stylesheet">
+<!-- Import map so vision_engine.js can use onnxruntime-web as an ES module -->
+<script type="importmap">
+{
+  "imports": {
+    "onnxruntime-web": "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js"
+  }
+}
+</script>
+<!-- Browser-side ML inference (LightGBM SAM predictor — exports to globalThis) -->
+<script src="/ml_pipeline/ml_inference.js"></script>
 <style>
 :root{
   --forest:#1B3A2D;--forest-d:#11261C;--green:#216A3F;--red:#C0392B;
@@ -769,10 +779,16 @@ window.addEventListener('appinstalled', ()=>{
 
 // SW messages
 if('serviceWorker' in navigator){
-  navigator.serviceWorker.addEventListener('message', e=>{
+  navigator.serviceWorker.addEventListener('message', async e=>{
     if(e.data?.type==='SYNC_COMPLETE') updateSyncPill();
     if(e.data?.type==='NAV') jump(e.data.screen);
     if(e.data?.type==='controllerchange') document.getElementById('update-banner').style.display='block';
+    if(e.data?.type==='RUN_SYNC'){
+      // SW asked us to flush the offline queue
+      const result = await AURA_API.syncNow();
+      navigator.serviceWorker.controller?.postMessage({ type:'SYNC_RESULT', ...result });
+      updateSyncPill();
+    }
   });
 }
 
