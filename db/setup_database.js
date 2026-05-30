@@ -3,7 +3,10 @@
 const path = require('path');
 const Database = require('./database');
 
-const DB_PATH = path.resolve(__dirname, 'aura_local.db');
+// On Vercel the deployment filesystem is read-only; use /tmp for a writable DB.
+const DB_PATH = process.env.VERCEL
+  ? '/tmp/aura_local.db'
+  : path.resolve(__dirname, 'aura_local.db');
 
 /**
  * All-in-one setup script for the AURA local database.

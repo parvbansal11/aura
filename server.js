@@ -289,7 +289,12 @@ app.get('*', (_req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-app.listen(PORT, () => {
-  console.log(`[AURA] Server running at http://localhost:${PORT}`);
-  console.log(`[AURA] Open the PWA at http://localhost:${PORT}`);
-});
+// ── Export for Vercel serverless; listen only when run directly ────────────
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`[AURA] Server running at http://localhost:${PORT}`);
+    console.log(`[AURA] Open the PWA at http://localhost:${PORT}`);
+  });
+}
+
+module.exports = app;

@@ -4,7 +4,7 @@
    Background sync wired to AURA_API.syncNow().
    ============================================================ */
 
-const CACHE_VERSION = 'aura-v2';
+const CACHE_VERSION = 'aura-v3';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
@@ -12,10 +12,10 @@ const STATIC_ASSETS = [
   '/manifest.json',
   '/aura-api.js',
   '/ml_pipeline/ml_inference.js',
-  '/ml_pipeline/vision_engine.js',
   '/ml_pipeline/who_standards.json',
-  '/ml_pipeline/aura_sam_predictor_80kb.txt',
-  '/ml_pipeline/yolov8n.onnx'
+  '/ml_pipeline/aura_sam_predictor_80kb.txt'
+  // yolov8n.onnx (12 MB) is excluded from pre-cache to avoid SW install timeout;
+  // it is cached on first use by the fetch handler.
 ];
 
 // ─── Install: pre-cache static shell ───────────────────────
