@@ -326,6 +326,16 @@ function startRecognition(){
   recog.continuous = false;
   recogState = 'listening';
 
+  let settled = false;
+  const safety = setTimeout(() => finish(matchWorker(heardFinal || liveText)), 8000);
+  function finish(worker){
+    if(settled) return; settled = true;
+    clearTimeout(safety);
+    stopRecognition();
+    if(worker){ pendingWorker = worker; recogState = 'matched'; updateLiveTranscript(); setTimeout(() => go('vl4'), 500); }
+    else { go('vlpick'); }   // heard something but no name match -> tap to pick (never stuck)
+  }
+
   recog.onresult = (e) => {
     let interim = '';
     for(let i = e.resultIndex; i < e.results.length; i++){
@@ -334,22 +344,12 @@ function startRecognition(){
     }
     liveText = (heardFinal + interim).trim();
     updateLiveTranscript();
-    if(heardFinal.trim()){
-      const w = matchWorker(heardFinal);
-      if(w){ pendingWorker = w; recogState = 'matched'; stopRecognition(); setTimeout(() => go('vl4'), 650); }
-    }
+    const w = matchWorker(liveText);            // match on everything heard, interim included
+    if(w) finish(w);
+    else if(heardFinal.trim()) finish(null);    // final result with no match -> picker
   };
-  recog.onerror = (e) => {
-    recogState = (e.error === 'not-allowed' || e.error === 'service-not-allowed') ? 'error' : 'nomatch';
-    updateLiveTranscript();
-  };
-  recog.onend = () => {
-    if(recogState === 'listening'){
-      const w = matchWorker(heardFinal || liveText);
-      if(w){ pendingWorker = w; recogState = 'matched'; setTimeout(() => go('vl4'), 400); }
-      else { recogState = heardFinal ? 'nomatch' : 'nomatch'; updateLiveTranscript(); }
-    }
-  };
+  recog.onerror = () => finish(matchWorker(heardFinal || liveText));
+  recog.onend   = () => { if(!settled) finish(matchWorker(heardFinal || liveText)); };
   try { recog.start(); } catch(err){ recogState = 'unsupported'; go('vlpick'); }
 }
 function stopRecognition(){ try { recog && recog.stop(); } catch(e){} }
