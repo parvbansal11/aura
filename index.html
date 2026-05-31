@@ -376,6 +376,22 @@ function updateLiveTranscript(){
 function pickWorker(id){ pendingWorker = WORKERS.find(w => w.id === id) || WORKERS[0]; go('vl4'); }
 function confirmWorker(){ currentWorker = pendingWorker || WORKERS[0]; jump('vl5'); }
 
+// Type a name directly: match a seeded worker, else log in under the typed name
+function typedLogin(){
+  const el = document.getElementById('name-input');
+  const val = (el && el.value || '').trim();
+  if(!val) return;
+  const w = matchWorker(val);
+  if(w){ pendingWorker = w; }
+  else {
+    const base = WORKERS[0];   // representative centre data under the typed name
+    pendingWorker = { ...base, id:'AWW_TYPED', custom:true,
+      av: val.charAt(0).toUpperCase(), name: { en: val, hi: val } };
+  }
+  stopRecognition();
+  go('vl4');
+}
+
 /* ============================================================
    SECTION 5 — SVG ICONS
    ============================================================ */
@@ -494,14 +510,23 @@ const screens = {
         <div class="q" id="live-text" style="margin-top:4px;min-height:22px">…</div>
       </div>
       <button class="btn green" style="display:flex;gap:8px;align-items:center;justify-content:center" onclick="retryVoice()">${SVG.voice} ${L({en:'Speak again',hi:'फिर से बोलो'})}</button>
-      <button class="btn outline" style="margin-top:9px" onclick="stopRecognition();go('vlpick')">${L({en:'Or tap your name',hi:'या अपना नाम चुनो'})}</button>
+      <div style="display:flex;align-items:center;gap:8px;margin:14px 0 4px;color:var(--muted);font-size:11px"><div style="flex:1;height:1px;background:var(--line)"></div>${L({en:'or type your name',hi:'या नाम लिखो'})}<div style="flex:1;height:1px;background:var(--line)"></div></div>
+      <div style="display:flex;gap:8px">
+        <input id="name-input" type="text" autocomplete="off" placeholder="${L({en:'Type your name…',hi:'अपना नाम लिखो…'})}" onkeydown="if(event.key==='Enter')typedLogin()" style="flex:1;padding:13px 14px;border:1.5px solid var(--line);border-radius:11px;font-size:15px;font-family:inherit;outline:none" onfocus="this.style.borderColor='var(--green)'" onblur="this.style.borderColor='var(--line)'">
+        <button class="btn green" style="width:auto;padding:13px 18px" onclick="typedLogin()">${L({en:'Go',hi:'चलो'})}</button>
+      </div>
+      <button class="btn outline" style="margin-top:9px" onclick="stopRecognition();go('vlpick')">${L({en:'Or pick from the list',hi:'या सूची से चुनो'})}</button>
       </div></div></div>`;
   },
   vlpick(){
     return `<div class="screen active"><button class="backbtn" onclick="back()">‹ back</button>
       ${statusbar()}<div class="scroll"><div class="body">
       <div class="kw" style="font-size:22px">${L({en:'Tap your name',hi:'अपना नाम चुनो'})}</div>
-      <div class="sub">${L({en:'Find your Anganwadi centre below.',hi:'नीचे अपना आंगनवाड़ी केंद्र चुनो।'})}</div>
+      <div class="sub">${L({en:'Type your name, or find your centre below.',hi:'नाम लिखो, या नीचे अपना केंद्र चुनो।'})}</div>
+      <div style="display:flex;gap:8px;margin-bottom:16px">
+        <input id="name-input" type="text" autocomplete="off" placeholder="${L({en:'Type your name…',hi:'अपना नाम लिखो…'})}" onkeydown="if(event.key==='Enter')typedLogin()" style="flex:1;padding:13px 14px;border:1.5px solid var(--line);border-radius:11px;font-size:15px;font-family:inherit;outline:none" onfocus="this.style.borderColor='var(--green)'" onblur="this.style.borderColor='var(--line)'">
+        <button class="btn green" style="width:auto;padding:13px 18px" onclick="typedLogin()">${L({en:'Go',hi:'चलो'})}</button>
+      </div>
       ${WORKERS.map(w=>`<div class="slot" onclick="pickWorker('${w.id}')">
         <div class="dot" style="background:var(--forest)">${w.av}</div>
         <div class="meta"><div class="a" style="color:var(--ink)">${L(w.name)}</div><div class="b">${w.centre} · ${L(w.block)}</div></div>
