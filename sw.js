@@ -4,7 +4,7 @@
    Background sync wired to AURA_API.syncNow().
    ============================================================ */
 
-const CACHE_VERSION = 'aura-v6';
+const CACHE_VERSION = 'aura-v7';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
@@ -56,6 +56,23 @@ self.addEventListener('fetch', (event) => {
         new Response(JSON.stringify({ error: 'offline', code: 503 }), {
           headers: { 'Content-Type': 'application/json' }
         })
+      )
+    );
+    return;
+  }
+
+  // App code (HTML navigations + .js) → NETWORK-FIRST so redeploys always load.
+  // Falls back to cache only when offline.
+  if (event.request.mode === 'navigate' || url.pathname.endsWith('.js') || url.pathname.endsWith('.html')) {
+    event.respondWith(
+      fetch(event.request).then(response => {
+        if (response && response.status === 200) {
+          const clone = response.clone();
+          caches.open(CACHE_VERSION).then(cache => cache.put(event.request, clone));
+        }
+        return response;
+      }).catch(() =>
+        caches.match(event.request).then(c => c || caches.match('/index.html'))
       )
     );
     return;

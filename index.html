@@ -295,6 +295,7 @@ svg{width:20px;height:20px;flex-shrink:0;display:block}
    SECTION 4 — APP STATE
    ============================================================ */
 let lang = 'hi';
+const BUILD = 'build 7';
 let stack = ['vl1'];
 let currentWorker = null;   // the logged-in worker (drives the whole dashboard)
 let pendingWorker = null;   // worker matched at login, awaiting confirmation
@@ -495,7 +496,7 @@ const screens = {
       <div class="chip"><span class="pulse"></span>${lang==='hi'?'ऑफ़लाइन चलता है':'WORKS OFFLINE'}</div>
       <button class="startbtn" onclick="handleVoiceLogin()">${SVG.voice} ${t.vlBegin}</button>
       <div class="fine">${t.vlTag}</div>
-      <div class="govstrip">${lang==='hi'?'वाधवानी AI · खूंटी, झारखंड':'Wadhwani AI · Khunti, Jharkhand'}</div>
+      <div class="govstrip">${lang==='hi'?'वाधवानी AI · खूंटी, झारखंड':'Wadhwani AI · Khunti, Jharkhand'} · ${BUILD}</div>
     </div>`;
   },
   vl2(){
